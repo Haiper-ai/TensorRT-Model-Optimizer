@@ -19,8 +19,10 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import os
+import sys
+from typing import Optional, Tuple, Union
 import argparse
-
 import torch
 from config import (
     FP8_FP16_DEFAULT_CONFIG,
@@ -28,17 +30,16 @@ from config import (
     get_int8_config,
     set_stronglytyped_precision,
 )
-from diffusers import (
-    DiffusionPipeline,
-    FluxPipeline,
-    StableDiffusion3Pipeline,
-    StableDiffusionPipeline,
-)
+import yaml
+from model import QuantisedCogVideoXTransformer3DModel
 from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from utils import check_lora, filter_func, load_calib_prompts, quantize_lvl, set_fmha
-
+from itertools import chain
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from pipe import AugmentedTextToVideoCogPipeline
+from schedulers import DPMSolverMultistepSchedulerRF
+from dotmap import DotMap
 
 MODEL_ID = {
     "sdxl-1.0": "stabilityai/stable-diffusion-xl-base-1.0",
@@ -48,17 +49,54 @@ MODEL_ID = {
     "sd3-medium": "stabilityai/stable-diffusion-3-medium-diffusers",
     "flux-dev": "black-forest-labs/FLUX.1-dev",
     "flux-schnell": "black-forest-labs/FLUX.1-schnell",
+    "cog": "checkpoints/mp_rank_00_model_states.pt" 
 }
 
 # You can include the desired arguments for calibration at this point.
 ADDTIONAL_ARGS = {
-    "flux-dev": {
-        "height": 1024,
-        "width": 1024,
-        "guidance_scale": 3.5,
-        "max_sequence_length": 512,
+    "cog": {
+        "height": 720,
+        "width": 1280,
+        "guidance_scale": 6,
+        "num_frames": 49,
     },
 }
+
+
+
+def load_deepspeed_checkpoint(
+    model_config,
+    local_deepspeed_checkpoint_state_dict=None,
+    model=None,
+):
+
+    from diffusers import CogVideoXPipeline
+    from cog_vae import AutoencoderKLCogVideoX
+
+    vae = AutoencoderKLCogVideoX.from_pretrained(
+        os.path.join(model_config.pretrained_dit_path, model_config.vae_config.pretrained_config.subfolder),
+        torch_dtype=torch.float16,
+    )
+
+    pipeline = CogVideoXPipeline.from_pretrained(model_config.pretrained_dit_path, torch_dtype=torch.float16, vae=vae)
+
+    if model is None:
+        model = QuantisedCogVideoXTransformer3DModel.from_config(
+            model_config.dit_config
+        )
+
+    if local_deepspeed_checkpoint_state_dict is not None:
+        if isinstance(local_deepspeed_checkpoint_state_dict, str):
+            checkpoint = torch.load(local_deepspeed_checkpoint_state_dict, map_location="cpu")
+        else:
+            checkpoint = local_deepspeed_checkpoint_state_dict
+
+        state_dict = checkpoint["module"]
+
+        missing_unexpected_keys = model.load_state_dict(state_dict, strict=True)
+
+    return pipeline.tokenizer, pipeline.text_encoder, pipeline.vae, model
+
 
 
 def do_calibrate(pipe, calibration_prompts, **kwargs):
@@ -70,12 +108,10 @@ def do_calibrate(pipe, calibration_prompts, **kwargs):
             "num_inference_steps": kwargs["n_steps"],
         }
         other_args = (
-            ADDTIONAL_ARGS[kwargs["model_id"]]
-            if kwargs["model_id"] in ADDTIONAL_ARGS.keys()
-            else {}
+            ADDTIONAL_ARGS["cog"]
             # Also, you can add the negative_prompt when doing the calibration if the model allows
         )
-        pipe(**common_args, **other_args).images
+        pipe(**common_args, **other_args).frames
 
 
 def main():
@@ -135,6 +171,8 @@ def main():
         choices=[1.0, 2.0, 2.5, 3.0, 4.0],
         help="Quantization level, 1: CNN, 2: CNN+FFN, 2.5: CNN+FFN+QKV, 3: CNN+FC, 4: CNN+FC+fMHA",
     )
+    parser.add_argument("--pretrained_model_config", type=str, default="")
+    parser.add_argument("--base_checkpoint_to_load", type=str, default="")
     parser.add_argument(
         "--onnx-dir", type=str, default=None, help="Will export the ONNX if not None"
     )
@@ -143,29 +181,99 @@ def main():
 
     args.calib_size = args.calib_size // args.batch_size
 
-    if args.model == "sd2.1" or args.model == "sd2.1-base":
-        pipe = StableDiffusionPipeline.from_pretrained(
-            MODEL_ID[args.model], torch_dtype=torch.float16, safety_checker=None
+    with open(args.pretrained_model_config, "r") as file:
+        model_config = DotMap(yaml.safe_load(file))
+
+    # TODO(ziyu): None for now. Change later.
+    model = QuantisedCogVideoXTransformer3DModel.from_config(model_config.dit_config)
+    local_deepspeed_checkpoint_state_dict = None # "checkpoints/mp_rank_00_model_states.pt"
+
+    def convert_checkpoint(state_dict):
+        state_dict = torch.load(state_dict, map_location="cuda")["module"]
+
+        # Reconstruct the layer_mapping as per your model definition
+        additional_layer_locs = model_config.dit_config.additional_layer_locs
+        layer_mapping = list(
+            chain.from_iterable(
+                [
+                    (
+                        [("transformer_blocks", i)]
+                        + [("additional_transformer_blocks", additional_layer_locs.index(i))]
+                        if i in additional_layer_locs
+                        else [("transformer_blocks", i)]
+                    )
+                    for i in range(len(model.transformer_blocks))
+                ]
+            )
         )
-    elif args.model == "sd3-medium":
-        pipe = StableDiffusion3Pipeline.from_pretrained(
-            MODEL_ID[args.model], torch_dtype=torch.float16
-        )
-    elif args.model == "flux-dev":
-        pipe = FluxPipeline.from_pretrained(
-            MODEL_ID[args.model],
-            torch_dtype=torch.bfloat16,
-        )
-    else:
-        pipe = DiffusionPipeline.from_pretrained(
-            MODEL_ID[args.model],
-            torch_dtype=torch.float16,
-            variant="fp16",
-            use_safetensors=True,
-        )
+
+        # Build a new mapping from old indices to new indices
+        new_layer_order = []
+        for layer_type, idx in layer_mapping:
+            new_layer_order.append((layer_type, idx))
+
+        # Create a mapping from old indices to new indices in the combined list
+        index_mapping = {}
+        new_idx = 0
+        for layer_type, old_idx in new_layer_order:
+            index_mapping[(layer_type, old_idx)] = new_idx
+            new_idx += 1
+
+        # Now, adjust the state_dict accordingly
+        new_state_dict = {}
+
+        for key, value in state_dict.items():
+
+            # Check if the key belongs to transformer_blocks or additional_transformer_blocks
+            if key.startswith('transformer_blocks.') or key.startswith('additional_transformer_blocks.'):
+                # Extract the layer index and the rest of the key
+                parts = key.split('.')
+                block_type = parts[0]
+                old_idx = int(parts[1])
+                rest_of_key = '.'.join(parts[2:])
+                
+                # Map to new index
+                new_idx = index_mapping.get((block_type, old_idx))
+                if new_idx is None:
+                    continue  # This block might have been removed
+                # Create new key
+                new_key = f'transformer_blocks.{new_idx}.{rest_of_key}'
+                new_state_dict[new_key] = value
+            else:
+                # Keep other keys unchanged
+                new_state_dict[key] = value
+
+
+        return {"module": new_state_dict}
+
+    # local_deepspeed_checkpoint_state_dict = convert_checkpoint(local_deepspeed_checkpoint_state_dict)
+
+    device = "cuda"
+
+    (
+        tokenizer,
+        text_encoder,
+        vae,
+        model,
+    ) = load_deepspeed_checkpoint(
+        model_config,
+        local_deepspeed_checkpoint_state_dict,
+        model=model,
+    )
+    
+    inference_scheduler = DPMSolverMultistepSchedulerRF.from_config(model_config.inferece_scheduler_config)
+
+    pipe = AugmentedTextToVideoCogPipeline(
+        scheduler=inference_scheduler,
+        tokenizer=tokenizer,
+        text_encoder=text_encoder.to(device=device, dtype=torch.bfloat16),
+        vae=vae.to(device=device, dtype=torch.float16),
+        model=model.to(device=device, dtype=torch.bfloat16),
+    )
+
     pipe.to("cuda")
 
-    backbone = pipe.unet if args.model not in ["sd3-medium", "flux-dev"] else pipe.transformer
+    backbone = model
 
     if args.quant_level == 4.0:
         assert args.format != "int8", "We only support fp8 for Level 4 Quantization"
@@ -175,7 +283,7 @@ def main():
         # This is a list of prompts
         cali_prompts = load_calib_prompts(
             args.batch_size,
-            "./calib/calib_prompts.txt",
+            "diffusers/quantization/calib/calib_prompts.txt",
         )
         extra_step = (
             1 if args.model == "sd2.1" or args.model == "sd2.1-base" else 0
@@ -202,10 +310,7 @@ def main():
                 raise NotImplementedError
 
         def forward_loop(backbone):
-            if args.model not in ["sd3-medium", "flux-dev"]:
-                pipe.unet = backbone
-            else:
-                pipe.transformer = backbone
+            pipe.model = backbone
             do_calibrate(
                 pipe=pipe,
                 calibration_prompts=cali_prompts,
@@ -216,8 +321,7 @@ def main():
 
         # All the LoRA layers should be fused
         check_lora(backbone)
-        if args.model == "flux-dev":
-            set_stronglytyped_precision(quant_config, "BFloat16")
+        set_stronglytyped_precision(quant_config, "BFloat16")
         mtq.quantize(backbone, quant_config, forward_loop)
         quantize_lvl(backbone, args.quant_level)
         mtq.disable_quantizer(backbone, filter_func)

@@ -199,6 +199,17 @@ def generate_dummy_inputs(sd_version, device, is_infer=False):
         dummy_input["txt_ids"] = torch.randn(1, 512, 3, dtype=torch.float32, device=device)
         dummy_input["guidance"] = torch.randn(1, dtype=torch.float32, device=device)
         dummy_input["return_dict"] = False
+    elif sd_version == "cog":
+        dummy_input = {}
+        dummy_input["hidden_states"] = torch.randn(2, 13, 32, 90, 160, dtype=torch.bfloat16, device=device)
+        # dummy_input["hidden_states"] = torch.randn(1, 46800, 128, dtype=torch.bfloat16, device=device)
+        dummy_input["encoder_hidden_states"] = torch.randn(2, 226, 4096, dtype=torch.bfloat16, device=device)
+        # dummy_input["timestep_cond"] = torch.randn(2, dtype=torch.bfloat16, device=device)
+        dummy_input["timestep"] = torch.randn(2, dtype=torch.bfloat16, device=device)
+        dummy_input["img_ids"] = torch.randn(2, 46800, 3, dtype=torch.bfloat16, device=device)
+        dummy_input["txt_ids"] = torch.randn(2, 226, 3, dtype=torch.bfloat16, device=device)
+        dummy_input["return_dict"] = False
+
     else:
         raise NotImplementedError(f"Unsupported sd_version: {sd_version}")
 

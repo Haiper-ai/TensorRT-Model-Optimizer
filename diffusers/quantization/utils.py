@@ -37,7 +37,7 @@ except ModuleNotFoundError:
 
 def filter_func(name):
     pattern = re.compile(
-        r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|pos_embed|time_text_embed|context_embedder|norm_out|proj_out).*"
+        r".*(time_proj|time_embedding|patch_embed|time_text_embed|context_embedder|norm_out|proj_out|transformer_blocks\.(3[0-9]|40)).*"
     )
     return pattern.match(name) is not None
 

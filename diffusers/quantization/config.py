@@ -184,6 +184,16 @@ FLUX_DEV_DYNAMIC_SHAPES = {
     "img_ids": {"min": [1, 4096, 3], "opt": [1, 4096, 3]},
 }
 
+COG_DYNAMIC_SHAPES = {
+    # "hidden_states": {"min": [1, 46800, 128], "opt": [1, 46800, 128]},
+    "hidden_states": {"min": [2, 13, 32, 90, 160], "opt": [2, 13, 32, 90, 160]},
+    "timestep": {"min": [2], "opt": [2]},
+    # "timestep_cond": {"min": [2], "opt": [2]},
+    "encoder_hidden_states": {"min": [2, 226, 4096], "opt": [2, 226, 4096]},
+    "img_ids": {"min": [2, 46800, 3], "opt": [2, 46800, 3]},
+    "txt_ids": {"min": [2, 226, 3], "opt": [2, 226, 3]},
+}
+
 FLUX_SCHNELL_DYNAMIC_SHAPES = FLUX_DEV_DYNAMIC_SHAPES.copy()
 FLUX_SCHNELL_DYNAMIC_SHAPES.pop("guidance")
 
@@ -226,6 +236,7 @@ DYNAMIC_SHAPES = {
     "sd3-medium": create_dynamic_shapes(SD3_DYNAMIC_SHAPES),
     "flux-dev": create_dynamic_shapes(FLUX_DEV_DYNAMIC_SHAPES),
     "flux-schnell": create_dynamic_shapes(FLUX_SCHNELL_DYNAMIC_SHAPES),
+    "cog": create_dynamic_shapes(COG_DYNAMIC_SHAPES),
 }
 
 IO_SHAPES = {
@@ -236,6 +247,7 @@ IO_SHAPES = {
     "sd3-medium": {"out.0": [2, 16, 128, 128]},
     "flux-dev": {},
     "flux-schnell": {},
+    "cog": {},
 }
 
 

@@ -1,0 +1,69 @@
+trainer: DiTCogTrainer
+loading_function: load_cogX3D_from_cogX_grow
+pretrained_path: &pretrained_path ~
+pretrained_dit_path: &pretrained_dit_path /data1/models/CogVideoX-2b/
+
+inferece_scheduler_config:
+  use_train_scheduler: false
+  sampler_type: DPMSolverMultistepSchedulerRF
+  sampler_params:
+    num_train_timesteps: 1000
+    beta_start: 0.00001
+    beta_end: 0.03
+    beta_schedule: linear
+    use_karras_sigmas: false
+    # rescale_betas_zero_snr: true
+    algorithm_type: sde-dpmsolver++
+
+
+scheduler_config:
+  scheduler_type: RectifiedFlowSampler
+  pretrained: false
+  untrained_config:
+    eps: 0.002
+    noise_scale: 1.0
+    sigma_var: 0.0
+
+vae_config:
+  vae_type: AutoencoderKLCogVideoX
+  pretrained: true
+  pretrained_config:
+    pretrained_path: *pretrained_dit_path
+    subfolder: vae
+  untrained_config: ~
+
+dit_config:
+  num_attention_heads: 30
+  attention_head_dim: 128
+  in_channels: 32
+  out_channels: 16
+  flip_sin_to_cos: true
+  freq_shift: 0
+  time_embed_dim: 512
+  text_embed_dim: 4096
+  num_layers: 1
+  additional_layer_locs: []
+  # num_layers: 30
+  # additional_layer_locs: [1, 4, 7, 10, 13, 16, 19, 22, 25, 28]
+  dropout: 0.0
+  attention_bias: true
+  sample_width: 160
+  sample_height: 160
+  sample_frames: 128
+  patch_size: 2
+  temporal_compression_ratio: 4
+  max_text_seq_length: 226
+  activation_fn: gelu-approximate
+  timestep_activation_fn: silu
+  norm_elementwise_affine: true
+  norm_eps: 0.00005
+  spatial_interpolation_scale: 1.875
+  temporal_interpolation_scale: 1.0
+  first_frame_conditioned: true
+  use_rope: true
+  use_cond_timestep_proj: true
+  num_experts: 1
+  slots_per_expert: 8
+  variable_fps_training:
+      frame_every: [2]
+
